@@ -16,6 +16,7 @@ def main():
     parser = argparse.ArgumentParser(description="Broken JSON Fixer using Gemini")
     parser.add_argument("input_file", nargs="?", type=argparse.FileType("r"), default=sys.stdin, help="File containing broken JSON. Reads from stdin if omitted.")
     parser.add_argument("--dry-run", action="store_true", help="Show fix summary without outputting the JSON")
+    parser.add_argument("--api-key", help="Gemini API Key (optional if GEMINI_API_KEY env var is set)")
     args = parser.parse_args()
 
     # If reading from stdin and it's an interactive terminal, we prompt nicely.
@@ -32,9 +33,9 @@ def main():
         print("Error: Input is empty", file=sys.stderr)
         sys.exit(1)
 
-    api_key = os.environ.get("GEMINI_API_KEY")
+    api_key = args.api_key or os.environ.get("GEMINI_API_KEY")
     if not api_key:
-        print("Error: GEMINI_API_KEY environment variable not set. Please set it to use the tool.", file=sys.stderr)
+        print("Error: GEMINI_API_KEY environment variable not set, and --api-key was not provided.", file=sys.stderr)
         sys.exit(1)
 
     client = genai.Client(api_key=api_key)
