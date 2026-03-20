@@ -7,8 +7,8 @@ from typing import List, Optional, Any
 from google import genai
 from google.genai import types
 
+
 def load_env():
-    # Simple .env parser so we don't need to install python-dotenv
     env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
     if os.path.exists(env_path):
         with open(env_path, "r") as f:
@@ -17,24 +17,41 @@ def load_env():
                     k, v = line.strip().split("=", 1)
                     os.environ[k.strip()] = v.strip().strip("'\"")
 
+
 class FixResult(BaseModel):
-    fixed_json: Optional[Any] = Field(description="The successfully parsed JSON object, strictly matching the intent of the input. Null if unable to fix.")
-    fixes: List[str] = Field(description="A list of short string descriptions of each structural fix applied (e.g. 'Added missing double quotes around keys'). Empty if no fixes were needed.")
-    status: str = Field(description="Must be 'success' if the JSON was successfully repaired, or 'fail' if it was hopelessly broken/ambiguous.")
+    fixed_json: Optional[Any]
+    fixes: List[str]
+    status: str
+
+
+def try_parse_json(content):
+    """Quick deterministic check before calling LLM"""
+    try:
+        return json.loads(content), []
+    except Exception:
+        return None, ["Input is not valid JSON, attempting repair via LLM"]
+
 
 def main():
     parser = argparse.ArgumentParser(description="Broken JSON Fixer using Gemini")
-    parser.add_argument("input_file", nargs="?", type=argparse.FileType("r"), default=sys.stdin, help="File containing broken JSON. Reads from stdin if omitted.")
-    parser.add_argument("--dry-run", action="store_true", help="Show fix summary without outputting the JSON")
-    parser.add_argument("--api-key", help="Gemini API Key (optional if GEMINI_API_KEY env var is set)")
+    parser.add_argument(
+        "input_file",
+        nargs="?",
+        type=argparse.FileType("r"),
+        default=sys.stdin,
+        help="File containing broken JSON. Reads from stdin if omitted.",
+    )
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--api-key")
     args = parser.parse_args()
 
-    # Load local .env file
     load_env()
 
-    # If reading from stdin and it's an interactive terminal, we prompt nicely.
     if args.input_file is sys.stdin and sys.stdin.isatty():
-        print("Reading from stdin... Enter broken JSON and press Ctrl-Z (then Enter) on Windows (or Ctrl-D on Unix) when done.", file=sys.stderr)
+        print(
+            "Reading from stdin... Enter JSON and press Ctrl-Z (Windows) or Ctrl-D (Unix)",
+            file=sys.stderr,
+        )
 
     try:
         content = args.input_file.read()
@@ -46,76 +63,94 @@ def main():
         print("Error: Input is empty", file=sys.stderr)
         sys.exit(1)
 
+    # STEP 1: Try normal parsing first
+    parsed, pre_fixes = try_parse_json(content)
+    if parsed is not None:
+        print("Status: Input already valid JSON", file=sys.stderr)
+        if not args.dry_run:
+            print(json.dumps(parsed, indent=2))
+        sys.exit(0)
+
     api_key = args.api_key or os.environ.get("GEMINI_API_KEY")
     if not api_key:
-        print("Error: GEMINI_API_KEY environment variable not set, and --api-key was not provided.", file=sys.stderr)
+        print("Error: Missing GEMINI_API_KEY", file=sys.stderr)
         sys.exit(1)
 
     client = genai.Client(api_key=api_key)
 
     prompt = f"""
 You are a strict JSON repair tool.
-Your job is to fix BROKEN JSON with MINIMAL changes.
 
-RULES:
-- Only fix STRUCTURAL issues:
-  - add missing quotes around keys
-  - convert single quotes to double quotes
-  - remove trailing commas
-  - close missing brackets/braces
-  - fix invalid escape characters
-- DO NOT change any values
-- DO NOT add, remove, or rename keys
+Fix ONLY structural issues:
+- missing quotes around keys
+- single → double quotes
+- trailing commas
+- unclosed brackets/braces
+- invalid escape sequences
+
+STRICT RULES:
+- DO NOT change values
+- DO NOT add/remove keys
 - DO NOT guess missing data
-- If the input is truncated, attempt to complete it based on apparent structure if obvious.
-- If the input is too broken or ambiguous -> return status = "fail"
+- If ambiguous → status = "fail"
+
+Return JSON in this format:
+{{
+  "fixed_json": <valid JSON or null>,
+  "fixes": ["short descriptions"],
+  "status": "success" or "fail"
+}}
 
 INPUT:
-<<<
 {content}
->>>
 """
 
     try:
         response = client.models.generate_content(
-            model='gemini-2.5-flash',
+            model="gemini-2.5-flash",
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
                 response_schema=FixResult,
-                temperature=0.0
+                temperature=0.0,
             ),
         )
-        
-        # Parse the structured response
-        result = json.loads(response.text)
+
+        try:
+            result = json.loads(response.text)
+        except Exception:
+            print("LLM returned invalid JSON output", file=sys.stderr)
+            sys.exit(1)
+
         status = result.get("status", "fail")
         fixes = result.get("fixes", [])
         fixed_json = result.get("fixed_json")
 
+        # Extra safety: ensure output is valid JSON
+        if fixed_json is not None:
+            try:
+                json.dumps(fixed_json)
+            except Exception:
+                print("LLM produced invalid JSON structure", file=sys.stderr)
+                sys.exit(1)
+
         if status != "success" or fixed_json is None:
-            print("Failed to fix JSON. The input may be too broken or ambiguous.", file=sys.stderr)
-            if fixes:
-                print("Reasons/Notes:", file=sys.stderr)
-                for f in fixes:
-                    print(f" - {f}", file=sys.stderr)
+            print("Failed to fix JSON", file=sys.stderr)
+            for f in fixes:
+                print(f" - {f}", file=sys.stderr)
             sys.exit(1)
 
-        # Print fixes to stderr so it doesn't corrupt stdout which could be piped
-        if fixes:
-            for f in fixes:
-                print(f"Fixed: {f}", file=sys.stderr)
-        else:
-            print("Status: No structural changes were needed.", file=sys.stderr)
+        # Print fixes
+        for f in pre_fixes + fixes:
+            print(f"Fixed: {f}", file=sys.stderr)
 
         if not args.dry_run:
             print(json.dumps(fixed_json, indent=2))
-        else:
-            print("(--dry-run enabled, omitted JSON output)", file=sys.stderr)
 
     except Exception as e:
-        print(f"Error during API call or processing: {e}", file=sys.stderr)
+        print(f"Error during processing: {e}", file=sys.stderr)
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()
