@@ -1,0 +1,11 @@
+{
+    "name": 'Dhwani',
+    "role": "Developer"
+    missing_quotes: true,
+    "skills": [
+        "python",
+        "genai",
+    ],
+    "nested": {
+        "broken": "yes"
+    }
