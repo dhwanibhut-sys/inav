@@ -7,6 +7,16 @@ from typing import List, Optional, Any
 from google import genai
 from google.genai import types
 
+def load_env():
+    # Simple .env parser so we don't need to install python-dotenv
+    env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    if os.path.exists(env_path):
+        with open(env_path, "r") as f:
+            for line in f:
+                if "=" in line and not line.strip().startswith("#"):
+                    k, v = line.strip().split("=", 1)
+                    os.environ[k.strip()] = v.strip().strip("'\"")
+
 class FixResult(BaseModel):
     fixed_json: Optional[Any] = Field(description="The successfully parsed JSON object, strictly matching the intent of the input. Null if unable to fix.")
     fixes: List[str] = Field(description="A list of short string descriptions of each structural fix applied (e.g. 'Added missing double quotes around keys'). Empty if no fixes were needed.")
@@ -18,6 +28,9 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Show fix summary without outputting the JSON")
     parser.add_argument("--api-key", help="Gemini API Key (optional if GEMINI_API_KEY env var is set)")
     args = parser.parse_args()
+
+    # Load local .env file
+    load_env()
 
     # If reading from stdin and it's an interactive terminal, we prompt nicely.
     if args.input_file is sys.stdin and sys.stdin.isatty():
